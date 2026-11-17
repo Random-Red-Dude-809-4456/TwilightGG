@@ -145,15 +145,20 @@
     card('Scratchpad', 'Draggable notepad overlay (kept until you close Nova)', 'tg-note'),
     card('Crosshair', 'Screen-center crosshair | Right-click switch for settings', 'tg-xh'),
     card('Fake Typer', 'Types text with human mistakes | Right-click switch for settings', 'tg-ty'),
+    card('Custom Cursor', 'Replace your mouse cursor (computer only) | Right-click switch for settings', 'tg-cur'),
   ]);
 
   var pTab = el('div', { id: 'tab-page', c: 'nova-sec' }, [
     card('Edit Page', 'Click text on site to edit', 'tg-edit'),
     card('Smart Dark Mode', 'Only recolors elements that actually have a background', 'tg-fdark'),
     card('Reverse Contrast', 'Invert page colors', 'tg-inv'),
+    card('Ad Blocker', 'Hides ads, blocks ad requests, skips YouTube ads', 'tg-ab', 'ab-lbl'),
+    card('Block Popups', 'Stops pages opening new windows/tabs', 'tg-pop'),
     card('Unlock Copy & Right-Click', 'Re-enables selecting, copying, pasting, context menu', 'tg-unl'),
     card('Show Passwords', 'Reveal password fields as plain text', 'tg-pw'),
-    card('Remove Elements', 'Click anything on the page to delete it', 'tg-rm'),
+    card('Remove Elements', 'Tap/click anything to delete it (page is locked while on, scrolling still works)', 'tg-rm', '', [
+      el('button', { id: 'btn-rmundo', c: 'nova-kbtn', t: 'Undo last remove' }),
+    ]),
     card('Highlight Links', 'Outline every link on the page', 'tg-hl'),
     card('Page Zoom', 'Zoom the page content (slider below)', 'tg-zoom', '', [
       el('input', { type: 'range', id: 'rg-zoom', c: 'nova-rng', min: '50', max: '200', value: '100' }),
@@ -238,7 +243,11 @@
     ])
   ]);
 
-  var acOvl = el('div', { id: 'nova-ac-ovl', c: 'nova-box dark' }, [acHdr, acBody]);
+  var acOvl = el('div', { id: 'nova-ac-ovl', c: 'nova-box dark' }, [
+    acHdr,
+    acBody,
+    el('button', { id: 'btn-openframe', c: 'nova-kbtn', style: 'margin-top:10px', t: 'Open iframe at target' }),
+  ]);
   shadow.appendChild(acOvl);
 
   // Performance Elements Setup
@@ -297,6 +306,7 @@
   document.addEventListener('mousemove', function (e) {
     st.x = e.clientX;
     st.y = e.clientY;
+    if (e.target !== host) { st.px = e.clientX; st.py = e.clientY; }
   });
 
   var showToast = function (msg) {
@@ -430,8 +440,10 @@
         var nextWin = el.contentWindow;
         var rect = el.getBoundingClientRect();
 
-        x = x - rect.left;
-        y = y - rect.top;
+        var fsx = rect.width / (el.offsetWidth || 1) || 1;
+        var fsy = rect.height / (el.offsetHeight || 1) || 1;
+        x = (x - rect.left) / fsx - el.clientLeft;
+        y = (y - rect.top) / fsy - el.clientTop;
 
         var innerEl = nextDoc.elementFromPoint(x, y);
         if (!innerEl || innerEl === el) break;
@@ -443,7 +455,7 @@
         break;
       }
     }
-    return { element: el, doc: currentDoc, win: targetWin, cx: x, cy: y };
+    return { element: el, doc: currentDoc, win: targetWin, cx: x, cy: y, frame: !!(el && el.tagName === 'IFRAME') };
   };
 
   var start = function () {
@@ -462,6 +474,14 @@
       if (isTouch && tgt) tgt.style.pointerEvents = 'auto';
       if (blocked) return;
 
+      if (data && data.frame) { // still an iframe = cross-origin, the browser won't let us click inside
+        var nowT = Date.now();
+        if (nowT - (st.frameWarn || 0) > 4000) {
+          st.frameWarn = nowT;
+          showToast("Can't click inside that iframe (other site). Use 'Open iframe at target' in the AutoClicker panel.");
+        }
+        return;
+      }
       if (data && data.element) {
         try {
           var evtProps = {
@@ -1010,35 +1030,175 @@
     }
   };
 
-  // Remove Elements
-  var rm = { hov: null, prev: '' };
-  rm.clr = function () {
-    if (rm.hov) { rm.hov.style.outline = rm.prev; rm.hov = null; }
+  // Remove Elements: a transparent overlay catches your taps, so it works on phones,
+  // ignores the page's own touch handlers, and can hit iframes too.
+  css.textContent +=
+    '#nova-rmov{position:fixed;left:0;top:0;right:0;bottom:0;z-index:999980;display:none;pointer-events:auto;touch-action:pan-x pan-y;background:transparent}' +
+    '#nova-rmbox{position:fixed;display:none;border:2px solid #e53e3e;background:rgba(229,62,62,.18);z-index:999981;pointer-events:none;box-sizing:border-box}' +
+    '#nova-cur{position:fixed;left:0;top:0;width:0;height:0;z-index:1000005;pointer-events:none;display:none}';
+  var rmOv = el('div', { id: 'nova-rmov' });
+  var rmBox = el('div', { id: 'nova-rmbox' });
+  shadow.appendChild(rmOv);
+  shadow.appendChild(rmBox);
+  var rm = { t: null, isDown: 0, x: 0, y: 0, stack: [] };
+  rm.look = function (x, y) {
+    rmOv.style.pointerEvents = 'none'; // look through the overlay
+    var t = document.elementFromPoint(x, y);
+    rmOv.style.pointerEvents = '';
+    if (!t || t === host || host.contains(t) || t === document.body || t === document.documentElement) return null;
+    return t;
   };
-  rm.over = function (e) {
-    if (e.target === host) return;
-    rm.clr();
-    rm.hov = e.target;
-    rm.prev = e.target.style.outline;
-    e.target.style.outline = '2px solid #e53e3e';
+  rm.show = function (t) {
+    rm.t = t;
+    if (!t) { rmBox.style.display = 'none'; return; }
+    var r = t.getBoundingClientRect();
+    rmBox.style.display = 'block';
+    rmBox.style.left = r.left + 'px';
+    rmBox.style.top = r.top + 'px';
+    rmBox.style.width = r.width + 'px';
+    rmBox.style.height = r.height + 'px';
   };
-  rm.click = function (e) {
-    if (e.target === host) return;
-    e.preventDefault();
-    e.stopPropagation();
-    e.stopImmediatePropagation();
-    var t = rm.hov || e.target;
-    rm.hov = null;
-    if (t === document.body || t === document.documentElement) return;
-    t.remove();
+  rmOv.onpointerdown = function (e) {
+    rm.isDown = 1;
+    rm.x = e.clientX;
+    rm.y = e.clientY;
+    rm.show(rm.look(e.clientX, e.clientY));
   };
+  rmOv.onpointermove = function (e) {
+    if (rm.isDown) {
+      if (Math.abs(e.clientX - rm.x) + Math.abs(e.clientY - rm.y) > 12) { rm.isDown = 0; rm.show(null); } // scrolling, not a tap
+      return;
+    }
+    if (e.pointerType === 'mouse') rm.show(rm.look(e.clientX, e.clientY)); // desktop hover highlight
+  };
+  rmOv.onpointerup = function () {
+    if (!rm.isDown) return;
+    rm.isDown = 0;
+    var t = rm.t;
+    rm.show(null);
+    if (t && t.isConnected) {
+      rm.stack.push({ n: t, p: t.parentNode, s: t.nextSibling });
+      t.remove();
+      showToast('Removed. Use "Undo last remove" in its card to bring it back.');
+    }
+  };
+  rmOv.onpointercancel = function () { rm.isDown = 0; rm.show(null); };
+  rm.undo = function () {
+    var s = rm.stack.pop();
+    if (!s) { showToast('Nothing to undo.'); return; }
+    try { s.p.insertBefore(s.n, s.s && s.s.parentNode === s.p ? s.s : null); } catch (e) { try { s.p.appendChild(s.n); } catch (e2) {} }
+    showToast('Restored.');
+  };
+  $('btn-rmundo').onclick = rm.undo;
   feat.rm = function (on) {
-    document.removeEventListener('mouseover', rm.over, true);
-    document.removeEventListener('click', rm.click, true);
-    rm.clr();
+    rmOv.style.display = on ? 'block' : 'none';
+    if (!on) { rm.isDown = 0; rm.show(null); }
+  };
+
+  // ───────────────────────── Ad Blocker ─────────────────────────
+  var AD_DOM = ['doubleclick.net', 'googlesyndication.com', 'googleadservices.com', 'adservice.google.', 'amazon-adsystem.com', 'adnxs.com', 'taboola.com', 'outbrain.com', 'criteo.com', 'criteo.net', 'rubiconproject.com', 'pubmatic.com', 'openx.net', 'moatads.com', 'adsrvr.org', 'media.net', 'popads.net', 'popcash.net', 'propellerads.com', 'exoclick.com', 'juicyads.com', 'adsterra.com', 'revcontent.com', 'mgid.com', '2mdn.net', 'serving-sys.com', 'smartadserver.com', 'advertising.com', 'adform.net', 'casalemedia.com', 'bidswitch.net', 'yieldmo.com', 'adcolony.com', 'ads.pubmatic.com', 'zedo.com', 'adroll.com', 'quantserve.com', 'scorecardresearch.com', 'hotjar.com', 'trafficjunky.net', 'clickadu.com', 'hilltopads.net', 'onclickads.net', 'ad-maven.com', 'admaven.com', 'monetag.com', 'richpush.co', 'pushwoosh.com'];
+  var AD_SEL = [
+    'ins.adsbygoogle', '.adsbygoogle', '[id^="google_ads_"]', '[id^="div-gpt-ad"]', '[id^="gpt-ad"]', 'iframe[id^="google_ads_iframe"]',
+    'iframe[src*="doubleclick.net"]', 'iframe[src*="googlesyndication.com"]', 'iframe[src*="adnxs.com"]', 'iframe[src*="amazon-adsystem.com"]',
+    'iframe[src*="taboola.com"]', 'iframe[src*="outbrain.com"]', 'iframe[src*="criteo."]', 'iframe[src*="adsterra"]', 'iframe[src*="exoclick"]',
+    'iframe[src*="popads"]', 'iframe[src*="mgid.com"]', 'iframe[src*="revcontent"]',
+    'a[href*="doubleclick.net/"]', 'a[href*="googleadservices.com"]', 'a[href*="adsterra"]',
+    '[data-ad-slot]', '[data-ad-client]', '[data-google-query-id]',
+    '.ad-container', '.ad-banner', '.ad-slot', '.ad-wrapper', '.ad-box', '.ad-unit', '.ad-placeholder', '.ad_wrapper', '.advert', '.advertisement', '.advertising',
+    '.banner-ad', '.top-ad', '.sidebar-ad', '.sticky-ad', '.adsbox', '[id*="advertisement"]', '[class*="advertisement"]', '[aria-label="Advertisement"]', '[aria-label="advertisement"]',
+    '.taboola', '[id^="taboola-"]', '.trc_rbox_container', '.OUTBRAIN', '[id^="outbrain"]', '.ob-widget', '.mgid', '[id^="mgid"]', 'amp-ad', 'amp-embed'
+  ].join(',');
+  var ab = { blocked: 0, pops: 0, style: null, iv: 0, undo: [] };
+  var abLbl = $('ab-lbl');
+  var abDefault = abLbl.textContent;
+  var adHit = function (u) {
+    try { u = String(u && u.url ? u.url : u); } catch (e) { return false; }
+    for (var i = 0; i < AD_DOM.length; i++) if (u.indexOf(AD_DOM[i]) > -1) return true;
+    return false;
+  };
+  var abStatus = function () {
+    var n = 0;
+    try { n = document.querySelectorAll(AD_SEL).length; } catch (e) {}
+    abLbl.textContent = 'Hidden: ' + n + ' | Blocked requests: ' + ab.blocked + ' | Popups: ' + ab.pops;
+  };
+  var abTick = function () {
+    abStatus();
+    // YouTube: click skip buttons and jump video ads to the end
+    if (/(^|\.)youtube\.com$/.test(location.hostname)) {
+      var sk = document.querySelector('.ytp-skip-ad-button,.ytp-ad-skip-button,.ytp-ad-skip-button-modern');
+      if (sk) sk.click();
+      var pl = document.querySelector('.html5-video-player.ad-showing video');
+      if (pl && isFinite(pl.duration) && pl.duration > 0 && pl.currentTime < pl.duration - 0.3) pl.currentTime = pl.duration - 0.1;
+    }
+  };
+  feat.ab = function (on) {
+    // undo previous patches
+    ab.undo.forEach(function (f) { try { f(); } catch (e) {} });
+    ab.undo = [];
+    clearInterval(ab.iv);
+    ab.iv = 0;
+    if (ab.style) { ab.style.remove(); ab.style = null; }
+    abLbl.textContent = abDefault;
+    if (!on) return;
+
+    // 1) hide ad elements
+    ab.style = document.createElement('style');
+    ab.style.id = 'nova-adblock';
+    ab.style.textContent = AD_SEL + '{display:none !important;visibility:hidden !important;height:0 !important;min-height:0 !important;overflow:hidden !important}';
+    document.head.appendChild(ab.style);
+
+    // 2) block requests to ad domains made after this point
+    var of = window.fetch;
+    window.fetch = function (u) {
+      if (adHit(u)) { ab.blocked++; return Promise.reject(new TypeError('Blocked by NovaScriptin')); }
+      return of.apply(this, arguments);
+    };
+    ab.undo.push(function () { window.fetch = of; });
+
+    var ox = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function (m, u) {
+      if (adHit(u)) { ab.blocked++; arguments[1] = 'data:,'; }
+      return ox.apply(this, arguments);
+    };
+    ab.undo.push(function () { XMLHttpRequest.prototype.open = ox; });
+
+    [HTMLScriptElement.prototype, HTMLIFrameElement.prototype, HTMLImageElement.prototype].forEach(function (proto) {
+      var d = Object.getOwnPropertyDescriptor(proto, 'src');
+      if (!d || !d.set) return;
+      Object.defineProperty(proto, 'src', {
+        configurable: true,
+        enumerable: d.enumerable,
+        get: d.get,
+        set: function (v) {
+          if (adHit(v)) { ab.blocked++; return; }
+          d.set.call(this, v);
+        }
+      });
+      ab.undo.push(function () { Object.defineProperty(proto, 'src', d); });
+    });
+
+    var osa = Element.prototype.setAttribute;
+    Element.prototype.setAttribute = function (n, v) {
+      if (n === 'src' && /^(SCRIPT|IFRAME|IMG)$/.test(this.tagName) && adHit(v)) { ab.blocked++; return; }
+      return osa.apply(this, arguments);
+    };
+    ab.undo.push(function () { Element.prototype.setAttribute = osa; });
+
+    abTick();
+    ab.iv = setInterval(abTick, 1500);
+  };
+
+  // Block Popups
+  var oOpen = null;
+  feat.pop = function (on) {
+    if (oOpen) { window.open = oOpen; oOpen = null; }
     if (on) {
-      document.addEventListener('mouseover', rm.over, true);
-      document.addEventListener('click', rm.click, true);
+      oOpen = window.open;
+      window.open = function () {
+        ab.pops++;
+        showToast('Blocked a popup');
+        return null;
+      };
     }
   };
 
@@ -1392,6 +1552,133 @@
     pCheck('Press Enter when done', ts.enter, function (v) { ts.enter = v; }),
   ].forEach(function (n) { tsPop.body.appendChild(n); });
 
+  // ───────────────────────── Custom Cursor (computer only) ─────────────────────────
+  var cc = { style: 'ringdot', color: '#ffffff', size: 26, op: 100, smooth: 25, press: true, hide: true, emoji: '🎯', x: 0, y: 0, down: 0, raf: 0, on: 0 };
+  var curEl = el('div', { id: 'nova-cur' });
+  shadow.appendChild(curEl);
+  var curPageStyle = null, curShadowStyle = null;
+  var escT = function (t) { return String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); };
+
+  var drawCur = function () {
+    var s = cc.size, c = cc.color, o = '', stl = cc.style;
+    var ring = '<circle r="' + (s / 2) + '" fill="none" stroke="' + c + '" stroke-width="2"/>';
+    if (stl === 'dot') o = '<circle r="' + Math.max(3, s / 4) + '" fill="' + c + '"/>';
+    else if (stl === 'ring') o = ring;
+    else if (stl === 'ringdot') o = ring + '<circle r="2.5" fill="' + c + '"/>';
+    else if (stl === 'cross') o = '<line x1="' + (-s / 2) + '" y1="0" x2="' + (s / 2) + '" y2="0" stroke="' + c + '" stroke-width="2"/><line x1="0" y1="' + (-s / 2) + '" x2="0" y2="' + (s / 2) + '" stroke="' + c + '" stroke-width="2"/>';
+    else if (stl === 'arrow') {
+      var p = [[0, 0], [0, 0.85], [0.2, 0.66], [0.34, 1], [0.5, 0.93], [0.36, 0.6], [0.64, 0.6]].map(function (q) { return (q[0] * s) + ',' + (q[1] * s); }).join(' ');
+      o = '<polygon points="' + p + '" fill="' + c + '" stroke="#000" stroke-width="1" stroke-linejoin="round"/>';
+    } else if (stl === 'emoji') {
+      o = '<text x="0" y="0" font-size="' + s + '" text-anchor="middle" dominant-baseline="central">' + escT(cc.emoji || '🎯') + '</text>';
+    }
+    curEl.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="-64 -64 128 128" style="position:absolute;left:-64px;top:-64px;overflow:visible;opacity:' + cc.op / 100 + ';filter:drop-shadow(0 0 1px rgba(0,0,0,.6))">' + o + '</svg>';
+  };
+
+  var curHide = function (hide) {
+    if (curPageStyle) { curPageStyle.remove(); curPageStyle = null; }
+    if (curShadowStyle) { curShadowStyle.remove(); curShadowStyle = null; }
+    if (!hide) return;
+    curPageStyle = document.createElement('style');
+    curPageStyle.textContent = 'html,html *{cursor:none !important}';
+    document.head.appendChild(curPageStyle);
+    curShadowStyle = document.createElement('style');
+    curShadowStyle.textContent = '*{cursor:none !important}';
+    shadow.appendChild(curShadowStyle);
+  };
+
+  var curLoop = function () {
+    if (!cc.on) return;
+    var k = 1 - (cc.smooth / 100) * 0.92;
+    cc.x += (st.x - cc.x) * k;
+    cc.y += (st.y - cc.y) * k;
+    curEl.style.transform = 'translate(' + cc.x + 'px,' + cc.y + 'px) scale(' + (cc.down && cc.press ? 0.7 : 1) + ')';
+    cc.raf = requestAnimationFrame(curLoop);
+  };
+  cc.dn = function () { cc.down = 1; };
+  cc.upf = function () { cc.down = 0; };
+  cc.lv = function () { curEl.style.display = 'none'; };
+  cc.en = function () { if (cc.on) curEl.style.display = 'block'; };
+
+  feat.cur = function (on) {
+    cc.on = 0;
+    cancelAnimationFrame(cc.raf);
+    document.removeEventListener('mousedown', cc.dn, true);
+    document.removeEventListener('mouseup', cc.upf, true);
+    document.documentElement.removeEventListener('mouseleave', cc.lv);
+    document.documentElement.removeEventListener('mouseenter', cc.en);
+    curHide(false);
+    curEl.style.display = 'none';
+    if (!on) return;
+    if (isTouch) {
+      $('tg-cur').checked = false;
+      showToast('Custom Cursor only works on computer.');
+      return;
+    }
+    cc.on = 1;
+    cc.x = st.x;
+    cc.y = st.y;
+    drawCur();
+    curEl.style.display = 'block';
+    document.addEventListener('mousedown', cc.dn, true);
+    document.addEventListener('mouseup', cc.upf, true);
+    document.documentElement.addEventListener('mouseleave', cc.lv);
+    document.documentElement.addEventListener('mouseenter', cc.en);
+    curHide(cc.hide);
+    curLoop();
+  };
+
+  var curPop = mkPop('Cursor Settings');
+  var curColor = el('input', { type: 'color', c: 'nova-clr', value: cc.color });
+  curColor.oninput = function () { cc.color = curColor.value; drawCur(); };
+  var curStyle = el('select', { c: 'nova-select' }, [
+    el('option', { value: 'ringdot', t: 'Ring + Dot' }),
+    el('option', { value: 'ring', t: 'Ring' }),
+    el('option', { value: 'dot', t: 'Dot' }),
+    el('option', { value: 'cross', t: 'Cross' }),
+    el('option', { value: 'arrow', t: 'Arrow' }),
+    el('option', { value: 'emoji', t: 'Emoji' }),
+  ]);
+  curStyle.value = cc.style;
+  curStyle.onchange = function () { cc.style = curStyle.value; drawCur(); };
+  var curEmoji = el('input', { type: 'text', c: 'nova-in', value: cc.emoji, maxLength: 8, placeholder: 'Emoji / character' });
+  curEmoji.oninput = function () { cc.emoji = curEmoji.value; drawCur(); };
+  stopKeys(curEmoji);
+  [
+    el('div', { c: 'nova-col', style: 'margin-bottom:10px' }, [el('label', { t: 'Style' }), curStyle]),
+    el('div', { c: 'nova-col', style: 'margin-bottom:10px' }, [el('label', { t: 'Color' }), curColor]),
+    el('div', { c: 'nova-col', style: 'margin-bottom:10px' }, [el('label', { t: 'Emoji (for Emoji style)' }), curEmoji]),
+    pSlider('Size', 8, 64, cc.size, 'px', function (v) { cc.size = v; drawCur(); }),
+    pSlider('Opacity', 20, 100, cc.op, '%', function (v) { cc.op = v; drawCur(); }),
+    pSlider('Smoothing', 0, 90, cc.smooth, '%', function (v) { cc.smooth = v; }),
+    pCheck('Shrink when clicking', cc.press, function (v) { cc.press = v; }),
+    pCheck('Hide system cursor', cc.hide, function (v) { cc.hide = v; if (cc.on) curHide(v); }),
+  ].forEach(function (n) { curPop.body.appendChild(n); });
+
+  $('tg-cur').parentNode.oncontextmenu = function (e) {
+    e.preventDefault();
+    if (isTouch) { showToast('Custom Cursor only works on computer.'); return; }
+    openPop(curPop, e);
+  };
+
+  // AutoClicker: open the iframe under the target in its own tab (cross-origin frames can't be clicked from outside)
+  $('btn-openframe').onclick = function () {
+    var px = st.px, py = st.py;
+    if (isTouch && tgt) {
+      var r = tgt.getBoundingClientRect();
+      px = r.left + r.width / 2;
+      py = r.top + r.height / 2;
+      tgt.style.pointerEvents = 'none';
+    }
+    var f = document.elementFromPoint(px, py);
+    if (isTouch && tgt) tgt.style.pointerEvents = 'auto';
+    if (!f || f.tagName !== 'IFRAME') { showToast('No iframe under the target. Put the target (or last mouse spot) over it first.'); return; }
+    var src = f.src || f.getAttribute('src');
+    if (!src || src === 'about:blank') { showToast('That iframe has no URL to open.'); return; }
+    (oOpen || window.open).call(window, src, '_blank');
+    showToast('Opened the frame. Run Nova there and the AutoClicker will work in it.');
+  };
+
   // Right-click the switches to open settings
   $('tg-xh').parentNode.oncontextmenu = function (e) { e.preventDefault(); openPop(xsPop, e); };
   $('tg-ty').parentNode.oncontextmenu = function (e) { e.preventDefault(); openPop(tsPop, e); };
@@ -1513,7 +1800,7 @@
   }
 
   // Wire toggles to features
-  ['unl', 'pw', 'rm', 'hl', 'zoom', 'css', 'scroll', 'clk', 'note', 'xh', 'ty'].forEach(function (k) {
+  ['unl', 'pw', 'rm', 'hl', 'zoom', 'css', 'scroll', 'clk', 'note', 'xh', 'ty', 'ab', 'pop', 'cur'].forEach(function (k) {
     $('tg-' + k).onchange = function (e) { feat[k](e.target.checked); };
   });
   $('rg-zoom').oninput = function () { if ($('tg-zoom').checked) feat.zoom(1); };
@@ -1525,7 +1812,7 @@
   });
 
   $('tg-dark').onchange = function (e) {
-    [hub, ovl, acOvl, toast, aiOvl, clk, noteOvl, xsPop.p, tsPop.p].forEach(function (x) {
+    [hub, ovl, acOvl, toast, aiOvl, clk, noteOvl, xsPop.p, tsPop.p, curPop.p].forEach(function (x) {
       x.classList.toggle('dark', e.target.checked);
     });
   };
